@@ -504,3 +504,60 @@ def test_modify_event_times_no_errors():
         ["event2"],
         event_relative_time=20.0,
     )
+
+
+def test_build_event_id_to_turn_idx_with_a_late_dependency():
+    """An event joining a short and a long dependency chain keeps its real turn.
+
+    The graph below is walked breadth-first, so ``join`` is reached through
+    ``user_msg_1`` (depth 1) before ``deep`` (depth 3) has been walked:
+
+        root ──> user_msg_0 ──> mid ──> deep ──┐
+          │                                    ├──> join
+          └────> user_msg_1 ───────────────────┘
+
+    ``deep`` is in turn 1 (``user_msg_0`` is a send_message_to_user event among its
+    ancestors) and ``user_msg_1`` is a send_message_to_user dependency of ``join``,
+    so ``join`` belongs to turn 2. Reading ``deep``'s turn index before it has been
+    computed yields 0 and places ``join`` in turn 1 instead, which puts it in the
+    wrong per-turn event group.
+    """
+    from are.simulation.scenarios.scenario import Scenario
+    from are.simulation.types import ActionDescription
+
+    def oracle_event(event_id: str, app: str, function: str) -> OracleEvent:
+        return OracleEvent(
+            event_id=event_id,
+            action_desc=ActionDescription(app=app, function=function, args=[]),
+        )
+
+    def send_message_to_user(event_id: str) -> OracleEvent:
+        return oracle_event(event_id, "AgentUserInterface", "send_message_to_user")
+
+    def send_email(event_id: str) -> OracleEvent:
+        return oracle_event(event_id, "EmailClientApp", "send_email")
+
+    root = send_email("root")
+    user_msg_0 = send_message_to_user("user_msg_0")
+    mid = send_email("mid")
+    deep = send_email("deep")
+    user_msg_1 = send_message_to_user("user_msg_1")
+    join = send_email("join")
+
+    root.followed_by([user_msg_0, user_msg_1])
+    user_msg_0.followed_by(mid)
+    mid.followed_by(deep)
+    join.depends_on([user_msg_1, deep])
+
+    scenario = Scenario()
+    scenario.scenario_id = "test_late_dependency"
+    scenario.events = [root, user_msg_0, mid, deep, user_msg_1, join]
+
+    assert scenario.build_event_id_to_turn_idx() == {
+        "root": 0,
+        "user_msg_0": 0,
+        "user_msg_1": 0,
+        "mid": 1,
+        "deep": 1,
+        "join": 2,
+    }

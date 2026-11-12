@@ -158,6 +158,115 @@ class TestBuildEventIdToTurnIdx:
         }
         assert scenario.nb_turns == 3
 
+    def test_dependency_reached_after_the_event_that_depends_on_it(self):
+        """An event joining a short and a long dependency chain keeps its real turn.
+
+        The dependency graph below is walked breadth-first, so ``join`` is reached
+        through ``user_msg_1`` (depth 1) before ``deep`` (depth 3) has been walked:
+
+            root ──> user_msg_0 ──> mid ──> deep ──┐
+              │                                    ├──> join
+              └────> user_msg_1 ───────────────────┘
+
+        ``deep`` is in turn 1 (``user_msg_0`` is an end-of-turn event among its
+        ancestors) and ``user_msg_1`` is an end-of-turn dependency of ``join``, so
+        ``join`` belongs to turn 2 and the scenario has 3 turns. Reading ``deep``'s
+        turn index before it has been computed yields 0 and silently collapses the
+        last turn, which drops it from ``nb_turns`` and from the turn triggers and
+        per-turn validation built on top of it.
+        """
+        scenario = MagicMock()
+
+        def make_event(event_id):
+            event = MagicMock()
+            event.event_id = event_id
+            event.dependencies = []
+            event.successors = []
+            return event
+
+        root = make_event("root")
+        user_msg_0 = make_event("user_msg_0")
+        mid = make_event("mid")
+        deep = make_event("deep")
+        user_msg_1 = make_event("user_msg_1")
+        join = make_event("join")
+
+        def link(parent, child):
+            parent.successors.append(child)
+            child.dependencies.append(parent)
+
+        link(root, user_msg_0)
+        link(user_msg_0, mid)
+        link(mid, deep)
+        link(root, user_msg_1)
+        link(user_msg_1, join)
+        link(deep, join)
+
+        scenario.events = [root, user_msg_0, mid, deep, user_msg_1, join]
+
+        def is_send_message_to_user_mock(event):
+            return event.event_id in ("user_msg_0", "user_msg_1")
+
+        build_event_id_to_turn_idx(scenario, is_send_message_to_user_mock)
+
+        assert scenario.event_id_to_turn_idx == {
+            "root": 0,
+            "user_msg_0": 0,
+            "user_msg_1": 0,
+            "mid": 1,
+            "deep": 1,
+            "join": 2,
+        }
+        assert scenario.nb_turns == 3
+
+    def test_terminates_on_a_dependency_cycle(self):
+        """A cyclic dependency must not make the turn walk loop forever."""
+        scenario = MagicMock()
+
+        def make_event(event_id):
+            event = MagicMock()
+            event.event_id = event_id
+            event.dependencies = []
+            event.successors = []
+            return event
+
+        root, first, second = make_event("root"), make_event("a"), make_event("b")
+        for parent, child in ((root, first), (first, second), (second, first)):
+            parent.successors.append(child)
+            child.dependencies.append(parent)
+
+        scenario.events = [root, first, second]
+
+        build_event_id_to_turn_idx(scenario, lambda event: False)
+
+        assert scenario.nb_turns == 1
+        assert set(scenario.event_id_to_turn_idx) == {"root", "a", "b"}
+
+    def test_terminates_when_a_dependency_is_not_reachable_from_the_roots(self):
+        """A dependency missing from the walk must not make it loop forever."""
+        scenario = MagicMock()
+
+        def make_event(event_id):
+            event = MagicMock()
+            event.event_id = event_id
+            event.dependencies = []
+            event.successors = []
+            return event
+
+        root, child, orphan = make_event("root"), make_event("child"), make_event("orp")
+        root.successors.append(child)
+        child.dependencies.append(root)
+        # `orphan` is a dependency of `child` but is not a successor of anything, so
+        # the walk never visits it.
+        child.dependencies.append(orphan)
+
+        scenario.events = [root, child]
+
+        build_event_id_to_turn_idx(scenario, lambda event: False)
+
+        assert scenario.nb_turns == 1
+        assert scenario.event_id_to_turn_idx["child"] == 0
+
 
 class TestBenchmarkScenarioImportedFromJson:
     def test_initialize_turns_without_initialization(self):

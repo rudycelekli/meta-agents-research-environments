@@ -46,9 +46,25 @@ def build_event_id_to_turn_idx(
     event_id_to_turn_idx = defaultdict(lambda: 0)
     # Initialize a queue with event without dependencies
     queue = deque([e for e in scenario.events if not e.dependencies])
+    # Number of events deferred in a row because a dependency was still missing
+    deferred_in_a_row = 0
     # Perform BFS on events
     while queue:
         event = queue.popleft()
+        # An event is reached through its shortest dependency chain first, which can
+        # happen before its longest one has been walked. Computing its turn index now
+        # would read a default of 0 for every dependency that has not been visited
+        # yet and silently under-count the turn. Push the event back behind the
+        # dependencies that still have to be visited.
+        # `deferred_in_a_row` bounds this: once the whole remaining queue has been
+        # rotated without any progress, the missing dependencies are unreachable
+        # from the roots (or cyclic) and we fall through rather than loop forever.
+        if event.event_id not in visited_events and deferred_in_a_row <= len(queue):
+            if any(d.event_id not in visited_events for d in event.dependencies):
+                queue.append(event)
+                deferred_in_a_row += 1
+                continue
+        deferred_in_a_row = 0
         # If the event has not been visited yet
         if event.event_id not in visited_events:
             event_id_to_turn_idx[event.event_id] = 0
